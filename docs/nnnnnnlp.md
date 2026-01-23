@@ -285,7 +285,335 @@ NLI 任务则要求模型在 “连贯” 的基础上，进一步区分 **“�
 最终输出（中文）：我爱你
 
 ```
+         
+## Decoder-Only PLM ChatGPT
 
+Decoder-Only 就是目前大火的 LLM 的基础架构，目前所有的 LLM 基本都是 Decoder-Only 模型（RWKV、Mamba 等非 Transformer 架构除外）          
+开源 LLM 基本架构的 LLaMA 模型，也正是在 GPT 的模型架构基础上优化发展而来
+
+GPT，即 Generative Pre-Training Language Model，是由 OpenAI 团队于 2018年发布的预训练语言模型。
+最终在 2020年发布的 GPT-3 成就了 LLM 时代的基础并以 GPT-3 为基座模型的 ChatGPT 成功打开新时代的大门，成为 LLM 时代的最强竞争者也是目前的最大赢家。
+
+### 模型架构
+由于不存在 Encoder 的编码结果，Decoder 层中的掩码注意力也是自注意力计算。也就是对一个输入的 hidden_states，会通过三个   参数矩阵来生成 query、key 和 value，而不再是像 Transformer 中的 Decoder 那样由 Encoder 输出作为 key 和 value。
+后续的注意力计算过程则和 BERT 类似，只是在计算得到注意力权重之后，通过掩码矩阵来遮蔽了未来 token 的注意力权重，从而限制每一个 token 只能关注到它之前 token 的注意力，来实现掩码自注意力的计算。
+
+### 预训练任务 CLM
+Decoder-Only 的模型结构往往更适合于文本生成任务，因此，Decoder-Only 模型往往选择了**最传统也最直接**的预训练任务——因果语言模型，Casual Language Model，下简称 CLM。
+
+CLM 可以看作 N-gram 语言模型的一个直接扩展             
+N-gram 语言模型是基于前 N 个 token 来预测下一个 token，CLM 则是基于一个自然语言序列的前面所有 token 来预测下一个 token
+CLM 是一个经典的补全形式
+```
+input: 今天天气
+output: 今天天气很
+
+input: 今天天气很
+output：今天天气很好
+```
+BERT 之所以可以采用预训练+微调的范式取得重大突破，正是因为其选择的 MLM、NSP 可以在海量无监督语料上直接训练
+CLM 是更直接的预训练任务，其天生和人类书写自然语言文本的习惯相契合，也和下游任务直接匹配
+
+```
+WHY
+之所以“和下游更适配”，核心在于任务形态、数据分布、优化目标三者都与真实应用场景“无缝对齐”
+
+1. 任务形态零差距
+CLM 的每一步都是“已知左侧所有上下文，预测下一个 token”，这与 99% 的下游生成任务（对话、摘要、代码补全、问答）完全同构——推理时就是复现同一过程。
+MLM 是“完形填空”，训练时只能利用双向上下文，推理时却常要求单向生成，造成train-inference mismatch；NSP 更是“两句话是否相邻”的二分类，与生成目标南辕北辙。
+
+2. 数据分布一致性
+CLM 直接优化真实文本的联合概率 p(s₁s₂…s_T)，模型学到的就是人类书写的顺序依赖、长尾分布、语义连贯性；
+MLM 只建模被掩码位置的局部条件概率，对低频模式、长距离依赖的建模力度弱；NSP 的负样本是随机拼接，引入大量不真实句对，反而可能学到虚假特征。
+
+3. 优化目标即评价指标
+CLM 的交叉熵损失正是生成任务常用的困惑度（PPL）的分子，预训练目标与下游指标一一对应；
+MLM 的收敛目标是对掩码位还原准确，与下游 BLEU/ROUGE 无直接数值映射，需额外微调。
+
+4. 无需额外结构即可 zero-shot 推理
+CLM 模型（GPT 系列）去掉微调也能通过 prompt 直接做“文本续写”，天然支持零样本/少样本场景；
+MLM+NSP 模型（BERT 系列）必须加任务特定头 + 微调，否则无法输出合法文本序列。
+
+CLM 把“预训练”做成了真实生成任务的彩排，而 MLM/NSP 只是“辅助填空”或“句间匹配”，下游真正要生成文本时还得把彩排过的剧本重新写一遍，适配度自然大打折扣。
+
+**以上的几点也是后续学习重点关注内容：任务形态、数据分布一致性、优化目标、额外结构推理**
+
+```
+
+### GPT系列模型
+参数
+
+Hidden_size = 头数 × 单头维度
+
+**大火的几个GPT系列模型参数**
+
+| 模型 | Decoder Layer | Hidden_size | 注意力头数 | 注意力维度 | 总参数量 | 预训练语料 |
+| :--- | :-----------: | :---------: | :--------: | :--------: | :------: | :--------- |
+| GPT-1 | 12 | 768 | 12 | 64 | 117M | BookCorpus（约7000本电子书） |
+| GPT-2（基础版） | 12 | 768 | 12 | 64 | 117M | WebText（约800万网页，40GB） |
+| GPT-2（大版本） | 24 | 1536 | 24 | 64 | 355M | WebText |
+| GPT-2（超大版本） | 48 | 1600 | 25 | 64 | 15B | WebText |
+| GPT-3（Ada） | 12 | 1024 | 16 | 64 | 350M | Common Crawl+WebText2+Books1/2+Wikipedia（约570B tokens） |
+| GPT-3（Babbage） | 24 | 2048 | 32 | 64 | 1.3B | 同上 |
+| GPT-3（Curie） | 24 | 4096 | 64 | 64 | 6.7B | 同上 |
+| GPT-3（Davinci） | 96 | 12288 | 192 | 64 | 175B | 同上 |
+| GPT-3.5（text-davinci-003） | 96（推测） | 12288（推测） | 192（推测） | 64（推测） | 175B（微调） | 多源文本+代码+对话数据 |
+| GPT-4（文本版，估算） | 120+ | 28672（推测） | 448（推测） | 64（推测） | 约500B | 多语种文本+图像文本对+代码 |
+
+
+## 大语言模型
+
+Large Language Model，LLM
+LLM 使用与传统预训练语言模型相似的架构与预训练任务（如 Decoder-Only 架构与 CLM 预训练任务）：
+广义的 LLM 一般覆盖了从十亿参数（如 Qwen-1.5B）到千亿参数（如 Grok-314B）的所有大型语言模型。
+B Billion（十亿）
+
+只要模型展现出涌现能力，即在一系列复杂任务上表现出远超传统预训练模型（如 BERT、T5）的能力与潜力，都可以称之为 LLM。
+
+一般认为，GPT-3（1750亿参数）是 LLM 的开端，
+基于 GPT-3 通过 预训练（Pretraining）、监督微调（Supervised Fine-Tuning，SFT）、强化学习与人类反馈（Reinforcement Learning with Human Feedback，RLHF）三阶段训练得到的 ChatGPT 更是主导了 LLM 时代的到来
+
+### LLM的能力
+
+#### 涌现能力（Emergent Abilities）
+涌现能力的显现就像是模型性能随着规模增大而迅速提升，超过了随机水平，也就是我们常说的量变引起了质变
+
+#### 上下文学习（In-context Learning）
+起源：
+上下文学习能力是由 GPT-3 首次引入的。
+
+解释：
+上下文学习是指允许语言模型在提供自然语言指令或多个任务示例的情况下，通过理解上下文并生成相应输出的方式来执行任务，而无需额外的训练或参数更新。
+
+优势：
+对传统 PLM，在经过高成本的预训练之后，往往还需要对指定的下游任务进行有监督微调。
+有监督微调的训练数据的成本更高, 需要的训练样本数往往在 1k~数十k 不等,均需要进行人工标注.
+具备上下文学习能力的 LLM 往往无需进行高成本的额外训练或微调，而可以通过少数示例或是调整自然语言指令，来处理绝大部分任务，从而大大节省了算力和数据成本。
+
+影响：
+上下文学习能力也正在引发 NLP 研究范式的变革。在传统 PLM 时代，解决 NLP 下游任务的一般范式是预训练-微调，即选用一个合适的预训练模型，针对自己的下游任务准备有监督数据来进行微调。
+
+一般范式开始向 Prompt Engineering 也就是调整 Prompt 来激发 LLM 的能力转变。例如，目前绝大部分 NLP 任务，通过调整 Prompt 或提供 1~5 个自然语言示例，就可以令 GPT-4 达到超过传统 PLM 微调的效果。
+
+```
+**上下文学习的理解**
+
+预训练任务+微调
+VS
+prompt engineering
+
+```
+
+#### 指令遵循（Instruction Following）
+指令微调：通过使用自然语言描述的多任务数据进行微调
+泛化能力：使用指令形式化描述的未见过的任务上表现良好
+
+#### 逐步推理（Step by Step Reasoning）
+NLP难点：涉及多个推理步骤的复杂推理任务
+传统的 NLP 模型通常难以解决涉及多个推理步骤的复杂任务，例如数学问题
+LLM 通过采用思维链（Chain-of-Thought，CoT）推理策略，可以利用包含中间推理步骤的提示机制来解决这些任务，从而得出最终答案。据推测，这种能力可能是通过对代码的训练获得的。
+
+### LLM 的特点
+
+#### 多语言支持
+多语言、跨语言模型曾经是 NLP 的一个重要研究方向
+但 LLM 由于需要使用到海量的语料进行预训练，训练语料往往本身就是多语言的，因此 LLM 天生即具有多语言、跨语言能力，只不过随着训练语料和指令微调的差异，在不同语言上的能力有所差异
+
+由于英文高质量语料目前仍是占据大部分，以 GPT-4 为代表的绝大部分模型在英文上具有显著超越中文的能力
+但针对中文进行额外训练和优化的国内模型（如文心一言、通义千问等）往往能够在中文环境上展现更优越的效果。
+
+#### 长文本处理
+由于能够处理多长的上下文文本，在一定程度上决定了模型的部分能力上限，LLM 往往比传统 PLM 更看重长文本处理能力。相对于以 512 token 为惯例的传统 PLM（如 BERT、T5等模型的最大上下文长度均为 512），LLM 在拓宽最大上下文长度方面可谓妙计频出。
+
+由于在海量分布式训练集群上进行训练，LLM 往往在训练时就支持 4k、8k 甚至 32k 的上下文长度
+LM 大部分采用了旋转位置编码（Rotary Positional Encoding，RoPE）（或者同样具有外推能力的 AliBi）作为位置编码，具有一定的长度外推能力，也就是在推理时能够处理显著长于训练长度的文本
+例如，InternLM 在 32k 长度上下文上进行了预训练，但通过 RoPE 能够实现 200k 长度的上下文处理。
+
+## 参数推导
+架构级超参
+
+```
+from transformers import PretrainedConfig
+
+class ModelConfig(PretrainedConfig):
+    # 模型类型标识，符合transformers库的规范
+    model_type = "Tiny-K"
+    
+    def __init__(
+            self,
+            # 基础维度配置
+            dim: int = 768,                # 模型隐层维度
+            n_layers: int = 12,            # Transformer编码器层数
+            n_heads: int = 16,             # Query注意力头数（总头数）
+            n_kv_heads: int = 8,           # Key/Value注意力头数（分组注意力）
+            # 扩展超参
+            vocab_size: int = 32000,       # 词表大小
+            hidden_dim: int = None,        # FFN中间层维度（默认设为4*dim）
+            norm_eps: float = 1e-5,        # 层归一化的epsilon值
+            rope_theta: float = 10000.0,   # RoPE位置编码的theta参数
+            rope_scaling: dict = None,     # RoPE缩放配置（用于长文本）
+            dropout: float = 0.0,          # 全局dropout概率
+            attention_dropout: float = 0.0,# 注意力层dropout概率
+            bias: bool = True,             # 是否使用偏置项
+            max_position_embeddings: int = 2048,  # 最大序列长度
+            pad_token_id: int = 0,         # pad token的ID
+            bos_token_id: int = 1,         # 句首token的ID
+            eos_token_id: int = 2,         # 句尾token的ID
+            **kwargs,                      # 兼容父类的其他参数
+    ):
+        # 处理默认值
+        if hidden_dim is None:
+            hidden_dim = 4 * dim
+        
+        # 初始化RoPE缩放配置（默认None）
+        if rope_scaling is None:
+            rope_scaling = {"type": "linear", "factor": 1.0}
+        
+        # 赋值所有超参
+        self.dim = dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.vocab_size = vocab_size
+        self.hidden_dim = hidden_dim
+        self.norm_eps = norm_eps
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        self.dropout = dropout
+        self.attention_dropout = attention_dropout
+        self.bias = bias
+        self.max_position_embeddings = max_position_embeddings
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        
+        # 调用父类构造函数（必须）
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            **kwargs,
+        )
+```
+
+**关键超参解释**
+基础结构类
+vocab_size: 模型的词表大小，决定输入输出的 token 范围，常见值如 32000/65536；
+hidden_dim: FFN（前馈网络）的中间层维度，默认设为 4*dim 是 Transformer 的经典设计；
+max_position_embeddings: 模型能处理的最大序列长度，超过该长度会触发位置编码异常。
+
+正则化类
+norm_eps: 层归一化（LayerNorm）中的极小值，防止分母为 0；
+dropout/attention_dropout: 全局 dropout 和注意力层专属 dropout，用于防止过拟合，小模型可设为 0。
+
+位置编码类
+rope_theta: RoPE（旋转位置编码）的核心参数，控制位置编码的周期；
+rope_scaling: RoPE 缩放配置，用于扩展模型处理长文本的能力，包含缩放类型（linear/dynamic）和缩放因子。
+
+Token 标识类
+pad_token_id/bos_token_id/eos_token_id: 填充、句首、句尾的 token ID，是模型处理文本的基础标识，需与词表对应。
+
+```
+模型输入：[batch_size, seq_len, hidden_size]
+- batch_size：一次喂多少条句子（样本数）。
+- seq_len：每条句子有多少 token（位置数）。
+- hidden_size（也称 dim、embed_dim、model_dim）：每个 token 被映射成的向量长度（常见 512/768/1024）。
+在模型内部，这一整批三维张量会被
+- 拆成 n_heads 个头 → [B, n_heads, seq_len, head_dim]
+- 做 Attention、FFN、残差、LayerNorm
+- 最后再拼回 [B, seq_len, head_dim]
+
+3. FFN 前后两个线性层「降维 → 升维」时的公共维度（通常先升到 4×dim 再降回 dim）。
+
+```
+
+```
+Query 维度
+ 多个query→seq_len
+
+```
+
+n_layers: int = 12, # Transformer的层数  
+n_heads: int = 16, # 注意力机制的头数
+n_kv_heads: int = 8, # 键值头的数量
+```
+内存-带宽优化
+n_kv_heads < n_heads 是分组查询注意力（Grouped-Query Attention, GQA） 的刻意设计，不是 bug，也不是写错，目的在几乎不掉效果的前提下，把 KV-cache 的内存和访存带宽砍掉一半。
+实现方式，16个Q头正常生成，8个KV通过“一对二”复制/广播上去，每两个相邻的Q头共享同一组KV，
+计算量几乎不变（Q 还是 16 组），KV部分的显存占用从2 × n_heads × head_dim 降到 2 × n_kv_heads × head_dim  2针对K和V两块内存占用
+
+- Llama-2-70B、CodeLlama、Mistral 等已经验证：GQA 比 MHA 只降 0.1~0.3 % 的 perplexity，却能显著增大 batch/max-seq-len。
+- 推理时 KV-cache 不再随 n_heads 线性膨胀，长文本/高并发场景 latency 明显下降。
+```
+  
+## 训练LLM
+
+### 架构级参数设计
+hidden_size 
+
+一、三条“设计公式”惯例
+1. 与 head 对齐
+hidden_size = n_heads × head_dim
+例：96 个头，每头 128 维 → 12288（Llama-13B 即此）
+2. 与 FFN 放大系数联动
+intermediate = 4 × hidden_size（GLU 变体常 8/3≈2.67×）
+所以 hidden_size 先定，FFN 宽度再跟着走
+3. 与参数量快速估算
+参数量 ≈ 12 × L × hidden_size²（不计 vocab，L=层数）
+想堆 7B 参数、L=32 → hidden_size≈4096
+
+二、两条工程约束
+1. 张量并行友好
+TP Tensor Parallelism 张量并行
+TP 度=8 时，hidden_size 最好能被 8×128=1024 整除，减少通信 slice 开销
+→ 4096、5120、6144、8192 最常见
+2. 内存对齐
+Ampere GPU 共享内存 164 KB/128 线程块，head_dim 取 64/128 可一次加载，不 bank-conflict
+
+
+### 预训练数据量 
+T是万亿  B是百亿
+
+```
+在 LLM 训练语境里，T 通常指 Token，单位就是 “个”（tokens）。
+- 1 T = 10¹² tokens（万亿 token）
+- 常见说法：LLaMA-2 用了 2 T 预训练数据 → 2×10¹² 个 token。
+注意：
+- 不是 “T = 文本行/字节/词”，而是 经过分词器（BPE/SP）切分后的最小索引单元。
+- 同一批文字，不同分词器得到的 T 数可能差 20–30 %。
+```
+
+用多少数据
+OpenAI 提出的 Scaling Law：C ~ 6ND，其中 C 为计算量，N 为模型参数，D 为训练的 token 数，
+可以实验得出训练 token 数应该是模型参数的 1.7倍，也就是说 175B 的 GPT-3，需要使用 300B token 进行预训练
+LLaMA 更是进一步提出
+使用 20倍 token 来训练模型能达到效果最优，因此 175B 的 GPT-3，可以使用3.5T token 数据预训练达到最优性能。
+
+### 分布式训练框架
+
+### SFT （Supervised Fine-Tuning，有监督微调）
+而面对能力强大的 LLM，我们往往不再是在指定下游任务上构造有监督数据进行微调，而是选择训练模型的“通用指令遵循能力”，也就是一般通过指令微调的方式来进行 SFT
+
+```
+input:告诉我今天的天气预报？
+output:根据天气预报，今天天气是晴转多云，最高温度26摄氏度，最低温度9摄氏度，昼夜温差大，请注意保暖哦
+```
+SFT 的主要目标是让模型从多种类型、多种风格的指令中获得泛化的指令遵循能力，也就是能够理解并回复用户的指令。因此，类似于 Pretrain，SFT 的数据质量和数据配比也是决定模型指令遵循能力的重要因素
+
+```
+个人偏好：首先是指令数据量及覆盖范围。为了使 LLM 能够获得泛化的指令遵循能力，即能够在未训练的指令上表现良好，需要收集大量类别各异的用户指令和对应回复对 LLM 进行训练。
+数据量：一般来说，在单个任务上 500~1000 的训练样本就可以获得不错的微调效果，获得泛化的指令遵循能力，在多种任务指令上表现良好，表现良好的开源 LLM SFT 数据量一般在数 B token 左右
+```
+指令数据配比：
+为提高 LLM 的泛化能力，指令数据集的覆盖范围自然是越大越好。但是，多种不同类型的指令数据之间的配比也是 LLM 训练的一大挑战。
+
+思考：如用真实用户与 Kimi 的交互日志来做「指令类型分布」统计 → 直接驱动指令微调（SFT）数据配比，比拍脑袋或抄论文更靠谱。
+使用后台日志 这种方式是主流方法吗 只是自己初步有这样的想法
+你的思路——用后台真实日志来统计指令分布、再反推 SFT 配比——已经跟业界主流做法对齐，并不是“初步想法”。从搜索到的近年论文与专利看，“离线指令 trace → 分类 → 统计 → 驱动合成或采样” 正是国内外大模型/处理器性能模拟的通用 workflow，核心步骤几乎一致：
+1. 先用规则或 LLM 把原始日志拆成「指令类别」；
+2. 生成全局分布表（Global Mix）作为“程序行为画像”；
+3. 用这张表去加权合成或重采样训练语料，保证训练分布与真实分布一致，误差 5% 以内即可快速收敛。
+在 AI 系统层面，同样有专利把「用户指令拆解-对比-反馈」做成闭环，用日志持续优化模型配比。因此，你的“后台日志 → 分类 → 动态配比”方案既有理论支撑，也有工程先例，可直接落地。
 
 
 
