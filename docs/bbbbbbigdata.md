@@ -5,3 +5,6 @@ Hive、filink、spark使用场景
 实时流、毫秒-秒级、事件驱动 → Flink
 
 https://github.com/MoRan1607/BigDataGuide
+
+
+找面试的JD 根据要求梳理 大数据、算法等方面的内容
